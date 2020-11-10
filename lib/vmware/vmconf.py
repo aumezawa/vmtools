@@ -7,7 +7,7 @@ from __future__ import print_function
 
 #__all__     = ['']
 __author__  = 'aume'
-__version   = '0.0.0'
+__version   = '0.3.0'
 
 
 ################################################################################
@@ -547,7 +547,7 @@ def GetPortGroupConfig(host, name):
     return None
 
 
-def UpdatePortGroupConfig(host, name, vswitch=None, vlan=None):
+def UpdatePortGroupConfig(host, name, vswitch=None, vlan=None, pnics=None):
     spec = None
     for portgroup in host.configManager.networkSystem.networkConfig.portgroup:
         if portgroup.spec.name == name:
@@ -555,10 +555,17 @@ def UpdatePortGroupConfig(host, name, vswitch=None, vlan=None):
     if spec is None:
         return False
     #
-    if vswitch:
+    if vswitch is not None:
         spec.vswitchName = vswitch
     if vlan is not None:
         spec.vlanId = int(vlan)
+    if pnics is not None:
+        while len(spec.policy.nicTeaming.nicOrder.activeNic):
+            spec.policy.nicTeaming.nicOrder.activeNic.pop()
+        while len(spec.policy.nicTeaming.nicOrder.standbyNic):
+            spec.policy.nicTeaming.nicOrder.standbyNic.pop()
+        for nic in pnics:
+            spec.policy.nicTeaming.nicOrder.activeNic.append(nic)
     #
     try:
         host.configManager.networkSystem.UpdatePortGroup(name, spec)
@@ -628,11 +635,20 @@ def GetHostBusAdapterInfo(host, name):
     return None
 
 
-def GetPhysicalDiskList(host):
+def GetPhysicalDiskList(host, mode='naa'):
     disks = []
     for disk in host.configManager.storageSystem.storageDeviceInfo.scsiLun:
         if disk.deviceType == 'disk':
-            disks.append(disk.canonicalName)
+            if mode == 'naa':
+                disks.append(disk.canonicalName)
+            elif mode == 'uuid':
+                disks.append(disk.uuid)
+            elif mode == 'vml':
+                disks.append('vml.' + disk.uuid)
+            elif mode == 'both':
+                disks.append(disk.canonicalName + ' : vml.' + disk.uuid)
+            else:
+                disks.append(disk.canonicalName)
     disks.sort()
     return disks
 
@@ -668,6 +684,18 @@ def GetHostDatastoreInfo(host, name):
                 'disk'      : datastore.info.vmfs.extent[0].diskName
             }
     return None
+
+
+################################################################################
+### External Functions - Other Device
+################################################################################
+def GetPhysicalCdromList(host):
+    cdroms = []
+    for lun in host.config.storageDevice.scsiLun:
+        if lun.deviceType == 'cdrom':
+            cdroms.append(lun.deviceName)
+    #cdroms.sort()
+    return cdroms
 
 
 ################################################################################
@@ -756,9 +784,10 @@ def GetVirtualDiskList(vm):
     disks = []
     for device in vm.config.hardware.device:
         if type(device) is vim.vm.device.VirtualDisk:
-            disks.append(device.deviceInfo.label)
-    disks.sort()
-    return disks
+            disks.append((device.deviceInfo.label, device.controllerKey, device.key))
+    disks.sort(key=lambda x: x[1])
+    disks.sort(key=lambda x: x[2])
+    return map(lambda x: x[0], disks)
 
 
 def GetVirtualDiskInfo(vm, name):
@@ -876,7 +905,7 @@ def GetVirtualCdRom(vm):
 VM_GUEST_SUPPORTED  = ['rhel7_64Guest', 'rhel8_64Guest', 'windows2019srv_64Guest']
 VM_GUEST_WINDOWS    = [                                  'windows2019srv_64Guest']
 VM_FIRMWARE_EFI     = [                 'rhel8_64Guest', 'windows2019srv_64Guest']
-def CreateVirtualMachineSpec(host, name, datastore, guestId, version=None, firmware=None, secureBoot=None, numCpus=1, numCoresPerSocket=1, memoryMB=2048, cdrom=True, scsis=[{'type': None, 'sharing': None}], disks=[{'size': 16, 'type': 'thick_lazy0', 'scsi': 0}], nics=[{'type': None, 'portgroup': 'VM Network', 'slot': None}]):
+def CreateVirtualMachineSpec(host, name, datastore, guestId, version=None, firmware=None, secureBoot=None, numCpus=1, numCoresPerSocket=1, memoryMB=2048, cdrom=True, scsis=[{'type': None, 'sharing': None, 'slot': None}], disks=[{'size': 16, 'type': 'thick_lazy0', 'scsi': 0, 'sharing': None}], nics=[{'type': None, 'portgroup': 'VM Network', 'slot': None}]):
     if datastore not in GetHostDatastoreList(host):
         return None
     if guestId not in VM_GUEST_SUPPORTED:
@@ -946,6 +975,8 @@ def CreateVirtualMachineSpec(host, name, datastore, guestId, version=None, firmw
     if scsis is not None:
         index = 0
         for scsi in scsis:
+            if index >= 4:
+                continue
             scsiSpec = vim.vm.device.VirtualDeviceSpec()
             scsiSpec.operation = vim.vm.device.VirtualDeviceSpec.Operation.add
             if scsi['type'] == 'PVSCSI':
@@ -957,6 +988,9 @@ def CreateVirtualMachineSpec(host, name, datastore, guestId, version=None, firmw
             else:
                 scsiSpec.device = vim.vm.device.ParaVirtualSCSIController()
             scsiSpec.device.key = 1000 + index
+            if scsi['slot'] is not None:
+                scsiSpec.device.slotInfo = vim.vm.device.VirtualDevice.PciBusSlotInfo()
+                scsiSpec.device.slotInfo.pciSlotNumber = int(scsi['slot'])
             scsiSpec.device.controllerKey = 100
             scsiSpec.device.unitNumber = 3 + index
             scsiSpec.device.busNumber = 0 + index
@@ -978,6 +1012,7 @@ def CreateVirtualMachineSpec(host, name, datastore, guestId, version=None, firmw
     spec.deviceChange.append(ahciSpec)
     #
     if cdrom is not None:
+        phyCdroms = GetPhysicalCdromList(host)
         cdromSpec = vim.vm.device.VirtualDeviceSpec()
         cdromSpec.operation = vim.vm.device.VirtualDeviceSpec.Operation.add
         cdromSpec.device = vim.vm.device.VirtualCdrom()
@@ -985,16 +1020,20 @@ def CreateVirtualMachineSpec(host, name, datastore, guestId, version=None, firmw
         cdromSpec.device.controllerKey = 15000
         cdromSpec.device.unitNumber = 0
         cdromSpec.device.backing = vim.vm.device.VirtualCdrom.AtapiBackingInfo()
-        cdromSpec.device.backing.deviceName = ''
-        cdromSpec.device.backing.useAutoDetect = True
+        if len(phyCdroms) > 0:
+            cdromSpec.device.backing.deviceName = phyCdroms[0]
+            cdromSpec.device.backing.useAutoDetect = False
+        else:
+            cdromSpec.device.backing.deviceName = ''
+            cdromSpec.device.backing.useAutoDetect = True
         cdromSpec.device.connectable = vim.vm.device.VirtualDevice.ConnectInfo()
         cdromSpec.device.connectable.allowGuestControl = True
         spec.deviceChange.append(cdromSpec)
     #
     if disks is not None:
-        indexes = {'0': 0, '1': 0, '2': 0, '3': 0, '4': 0, '5': 0, '6': 0, '7': 0}
+        indexes = {'0': 0, '1': 0, '2': 0, '3': 0}
         for disk in disks:
-            if int(disk['scsi']) >= 8 or indexes[str(disk['scsi'])] >= 16:
+            if int(disk['scsi']) >= 4 or indexes[str(disk['scsi'])] >= 16:
                 continue
             index = indexes[str(disk['scsi'])]
             diskSpec = vim.vm.device.VirtualDeviceSpec()
@@ -1012,6 +1051,10 @@ def CreateVirtualMachineSpec(host, name, datastore, guestId, version=None, firmw
                 diskSpec.device.backing.deviceName = lunInfo['device']
                 diskSpec.device.backing.compatibilityMode = 'physicalMode'
                 diskSpec.device.backing.diskMode = 'independent_persistent'
+                if disk['sharing'] == 'sharingMultiWriter':
+                    diskSpec.device.backing.sharing = 'sharingMultiWriter'
+                else:
+                    diskSpec.device.backing.sharing = 'sharingNone'
             else:
                 diskSpec.device.backing = vim.vm.device.VirtualDisk.FlatVer2BackingInfo()
                 diskSpec.device.backing.datastore = GetDatastore(host=host, name=datastore)
@@ -1029,7 +1072,10 @@ def CreateVirtualMachineSpec(host, name, datastore, guestId, version=None, firmw
             diskSpec.device.controllerKey = 1000 + int(disk['scsi'])
             diskSpec.device.unitNumber = 0 + index
             spec.deviceChange.append(diskSpec)
-            indexes[str(disk['scsi'])] = index + 1
+            if (index + 1) == 7:
+                indexes[str(disk['scsi'])] = index + 2
+            else:
+                indexes[str(disk['scsi'])] = index + 1
     #
     if nics is not None:
         index = 0
