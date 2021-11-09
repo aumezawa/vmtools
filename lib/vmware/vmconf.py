@@ -7,7 +7,7 @@ from __future__ import print_function
 
 #__all__     = ['']
 __author__  = 'aume'
-__version__ = '0.4.0'
+__version__ = '0.5.0'
 
 
 ################################################################################
@@ -815,6 +815,7 @@ def GetVirtualDiskInfo(vm, name):
                 #
                 return {
                     'name'      : device.deviceInfo.label,
+                    'file'      : device.backing.fileName,
                     'type'      : diskType,
                     'key'       : device.key,
                     'controller': device.controllerKey,
@@ -902,9 +903,9 @@ def GetVirtualCdRom(vm):
     return None
 
 
-VM_GUEST_SUPPORTED  = ['rhel7_64Guest', 'rhel8_64Guest', 'windows2019srv_64Guest']
-VM_GUEST_WINDOWS    = [                                  'windows2019srv_64Guest']
-VM_FIRMWARE_EFI     = [                 'rhel8_64Guest', 'windows2019srv_64Guest']
+VM_GUEST_SUPPORTED  = ['rhel7_64Guest', 'rhel8_64Guest', 'rhel9_64Guest', 'windows2019srv_64Guest']
+VM_GUEST_WINDOWS    = [                                                   'windows2019srv_64Guest']
+VM_FIRMWARE_EFI     = [                 'rhel8_64Guest', 'rhel9_64Guest', 'windows2019srv_64Guest']
 def CreateVirtualMachineSpec(host, name, datastore, guestId, version=None, firmware=None, secureBoot=None, numCpus=1, numCoresPerSocket=1, memoryMB=2048, cdrom=True, scsis=[{'type': None, 'sharing': None, 'slot': None}], disks=[{'size': 16, 'type': 'thick_lazy0', 'scsi': 0, 'sharing': None}], nics=[{'type': None, 'portgroup': 'VM Network', 'slot': None}]):
     if datastore not in GetHostDatastoreList(host):
         return None
@@ -1033,14 +1034,17 @@ def CreateVirtualMachineSpec(host, name, datastore, guestId, version=None, firmw
     if disks is not None:
         indexes = {'0': 0, '1': 0, '2': 0, '3': 0}
         for disk in disks:
-            if int(disk['scsi']) >= 4 or indexes[str(disk['scsi'])] >= 16:
+            if int(disk['scsi']) >= 4 or indexes[str(disk['scsi'])] >= 33:
                 continue
             index = indexes[str(disk['scsi'])]
             diskSpec = vim.vm.device.VirtualDeviceSpec()
             diskSpec.operation = vim.vm.device.VirtualDeviceSpec.Operation.add
             diskSpec.fileOperation = 'create'
             diskSpec.device = vim.vm.device.VirtualDisk()
-            diskSpec.device.key = 2000 + index + 16 * int(disk['scsi'])
+            if (index < 16):
+                diskSpec.device.key = 2000 + index + 16 * int(disk['scsi'])
+            else:
+                diskSpec.device.key = 131088 + (index - 16) + 256 * int(disk['scsi'])
             if disk['type'] == 'rdm':
                 lunInfo = GetPhysicalDiskInfo(host, naa=disk['naa'])
                 if lunInfo is None:
