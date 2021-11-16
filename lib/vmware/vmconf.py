@@ -7,13 +7,14 @@ from __future__ import print_function
 
 #__all__     = ['']
 __author__  = 'aume'
-__version__ = '0.5.0'
+__version__ = '0.6.0'
 
 
 ################################################################################
 ### Required Modules
 ################################################################################
 import atexit
+import re
 import ssl
 import sys
 import time
@@ -109,12 +110,16 @@ def GetDatastoreList(content):
     return dslist
 
 
-def GetDatastore(content=None, host=None, name=None):
+def GetDatastore(content=None, datacenter=None, host=None, name=None):
     if content is not None and name is not None:
         for dcname in GetDatacenterList(content):
             for datastore in GetDatacenter(content, dcname).datastore:
                 if datastore.name == name:
                     return datastore
+    if datacenter is not None and name is not None:
+        for datastore in datacenter.datastore:
+            if datastore.name == name:
+                return datastore
     if host is not None and name is not None:
         for datastore in host.datastore:
             if datastore.name == name:
@@ -171,6 +176,42 @@ def GetVm(content, name):
                 if type(node) is vim.Folder:
                     folders.append(node)
     return None
+
+
+################################################################################
+### External Functions - File
+################################################################################
+def GetIsoFileList(content=None, datacenter=None, host=None, datastore=None):
+    fileList = []
+    spec = vim.host.DatastoreBrowser.SearchSpec()
+    spec.matchPattern.append('*.iso')
+    #
+    datastores = []
+    if content is not None:
+        for dsname in GetDatastoreList(content):
+            datastores.append(GetDatastore(content=content, name=dsname))
+    if datacenter is not None:
+        for ds in datacenter.datastore:
+            datastores.append(ds)
+    if host is not None:
+        for ds in host.datastore:
+            datastores.append(ds)
+    if datastore is not None:
+        datastores.append(datastore)
+    #
+    for ds in datastores:
+        try:
+            task = ds.browser.SearchDatastoreSubFolders_Task('[' + ds.name + ']', spec)
+            while task.info.state == 'running':
+                time.sleep(1)
+            if task.info.state != 'success':
+                return fileList
+        except Exception as e:
+            return fileList
+        for result in task.info.result:
+            for file in result.file:
+                fileList.append(result.folderPath + '/' + file.path)
+    return fileList
 
 
 ################################################################################
@@ -1202,11 +1243,97 @@ def AddIntelSriovVirtualNicDevice(spec, host, sbdf, portgroup, slot=None):
     return spec
 
 
+def ReconfigVirtualMachineSpec(vm, numCpus=None, memoryMB=None, nodeAffinity=None, isoFile=None):
+    spec = vim.vm.ConfigSpec()
+    #
+    if numCpus is not None:
+        spec.numCPUs = numCpus
+        if nodeAffinity is None:
+            nodeNum = 0
+            for config in vm.config.extraConfig:
+                if config.key == 'numa.nodeAffinity':
+                    nodeNum = len(str(config.value).split(','))
+            if nodeNum > 1:
+                spec.extraConfig.append(vim.option.OptionValue(key='numa.vcpu.maxPerMachineNode', value=str(-(-spec.numCPUs // nodeNum)))) ## Rounded up
+                spec.extraConfig.append(vim.option.OptionValue(key='numa.vcpu.maxPerVirtualNode', value=str(-(-spec.numCPUs // nodeNum)))) ## Rounded up
+    #
+    if memoryMB is not None:
+        spec.memoryMB = memoryMB
+        if vm.config.memoryAllocation.reservation > 0:
+            spec.memoryReservationLockedToMax = True
+            spec.memoryAllocation = vim.ResourceAllocationInfo()
+            spec.memoryAllocation.reservation = spec.memoryMB
+            spec.extraConfig.append(vim.option.OptionValue(key='sched.mem.pin', value='TRUE'))
+    #
+    if nodeAffinity is not None:
+        if numCpus is not None:
+            cpuNum = numCpus
+        else:
+            cpuNum = vm.config.hardware.numCPU
+        #
+        if nodeAffinity == "":
+            nodeNum = 0
+        else:
+            nodeNum = len(str(nodeAffinity).split(','))
+        #
+        if nodeNum == 0:
+            spec.extraConfig.append(vim.option.OptionValue(key='numa.vcpu.maxPerMachineNode', value=''))
+            spec.extraConfig.append(vim.option.OptionValue(key='numa.vcpu.maxPerVirtualNode', value=''))
+            spec.extraConfig.append(vim.option.OptionValue(key='numa.autosize', value=''))
+            spec.extraConfig.append(vim.option.OptionValue(key='numa.nodeAffinity', value=''))
+        if nodeNum == 1:
+            spec.extraConfig.append(vim.option.OptionValue(key='numa.vcpu.maxPerMachineNode', value=''))
+            spec.extraConfig.append(vim.option.OptionValue(key='numa.vcpu.maxPerVirtualNode', value=''))
+            spec.extraConfig.append(vim.option.OptionValue(key='numa.autosize', value=''))
+            spec.extraConfig.append(vim.option.OptionValue(key='numa.nodeAffinity', value=str(nodeAffinity)))
+        if nodeNum > 1:
+            spec.extraConfig.append(vim.option.OptionValue(key='numa.vcpu.maxPerMachineNode', value=str(-(-cpuNum // nodeNum)))) ## Rounded up
+            spec.extraConfig.append(vim.option.OptionValue(key='numa.vcpu.maxPerVirtualNode', value=str(-(-cpuNum // nodeNum)))) ## Rounded up
+            spec.extraConfig.append(vim.option.OptionValue(key='numa.autosize', value='TRUE'))
+            spec.extraConfig.append(vim.option.OptionValue(key='numa.nodeAffinity', value=str(nodeAffinity)))
+    #
+    if isoFile is not None:
+        pattern = r'/vmfs/volumes/([^/]+)/(.+iso)'
+        match =  re.match(pattern, isoFile)
+        if match:
+            dsname = match.groups()[0]
+            isofile = match.groups()[1]
+            #
+            datacenter = vm.parent.parent
+            for file in GetIsoFileList(datacenter=datacenter):
+                if file == ('[' + dsname + '] ' + isofile):
+                    cdromSpec = vim.vm.device.VirtualDeviceSpec()
+                    cdromSpec.operation = vim.vm.device.VirtualDeviceSpec.Operation.edit
+                    cdromSpec.device = vim.vm.device.VirtualCdrom()
+                    cdromSpec.device.key = 16000
+                    cdromSpec.device.controllerKey = 15000
+                    cdromSpec.device.unitNumber = 0
+                    cdromSpec.device.backing = vim.vm.device.VirtualCdrom.IsoBackingInfo()
+                    cdromSpec.device.backing.fileName = file
+                    cdromSpec.device.backing.datastore = GetDatastore(datacenter=datacenter, name=dsname)
+                    spec.deviceChange.append(cdromSpec)
+    #
+    return spec
+
+
 def CreateVirtualMachine(spec, host):
     datacenter = host.parent.parent.parent
     pool = host.parent.resourcePool
     try:
         result = datacenter.vmFolder.CreateVM_Task(spec, pool)
+        while result.info.state == 'running':
+            time.sleep(1)
+        if result.info.state != 'success':
+            return False
+    except Exception as e:
+        return False
+    time.sleep(1)
+    return True
+
+
+def ReconfigVirtualMachine(vm, spec):
+    try:
+        result = vm.ReconfigVM_Task(spec)
         while result.info.state == 'running':
             time.sleep(1)
         if result.info.state != 'success':
