@@ -7,13 +7,14 @@ from __future__ import print_function
 
 #__all__     = ['']
 __author__  = 'aume'
-__version__ = '0.6.0'
+__version__ = '0.7.0'
 
 
 ################################################################################
 ### Required Modules
 ################################################################################
 import atexit
+import inspect
 import re
 import ssl
 import sys
@@ -25,6 +26,13 @@ try:
 except Exception as e:
     print(e)
     sys.exit(-1)
+
+try:
+    import esxclipy
+    import vmware.vsi as vsi
+    ExecOnESX = True
+except:
+    ExecOnESX = False
 
 
 ################################################################################
@@ -38,6 +46,23 @@ except Exception as e:
 
 
 ################################################################################
+### External Functions - Debugging
+################################################################################
+DEBUG = False
+def enableDebugMessage():
+    global DEBUG
+    DEBUG = True
+    return
+
+
+def printDebugMessage(e):
+    if DEBUG:
+        print('Error at Funcion: %s(), Line: %s' % (inspect.stack()[1].function, inspect.stack()[1].lineno))
+        print(e)
+    return
+
+
+################################################################################
 ### External Functions - Connection
 ################################################################################
 def Connect(protocol='https', host='localhost', port=443, user='root', password=''):
@@ -47,6 +72,7 @@ def Connect(protocol='https', host='localhost', port=443, user='root', password=
     try:
         si = SmartConnect(protocol=protocol, host=host, port=int(port), user=user, pwd=password, sslContext=ssl_context)
     except Exception as e:
+        printDebugMessage(e)
         return None
     #
     if not si:
@@ -207,10 +233,11 @@ def GetIsoFileList(content=None, datacenter=None, host=None, datastore=None):
             if task.info.state != 'success':
                 return fileList
         except Exception as e:
+            printDebugMessage(e)
             return fileList
         for result in task.info.result:
             for file in result.file:
-                fileList.append(result.folderPath + '/' + file.path)
+                fileList.append((result.folderPath + '/' + file.path).replace('//', '/'))
     return fileList
 
 
@@ -219,6 +246,13 @@ def GetIsoFileList(content=None, datacenter=None, host=None, datastore=None):
 ################################################################################
 def GetEsxVersion(host):
     return host.config.product.version
+
+
+def GetEsxMajorVersion(host):
+    try:
+        return int(host.config.product.version.split('.')[0])
+    except:
+        return None
 
 
 def GetEsxBuildNumber(host):
@@ -251,9 +285,42 @@ def UpdateKernelOption(host, name, value):
         reconfigOption.value = value
         host.configManager.advancedOption.UpdateOptions([reconfigOption])
     except Exception as e:
+        printDebugMessage(e)
         return False
     #
     return True
+
+
+################################################################################
+### External Functions - Kernel Option (ESXCLI)
+################################################################################
+def GetKernelOptionCli(name):
+    if ExecOnESX:
+        (err, val) = esxclipy.EsxcliPy().Execute(['system', 'settings', 'kernel', 'list'])
+        if err:
+            return None
+        for option in eval(val):
+            if option['Name'] == name:
+                return {
+                    'key'   : option['Name'],
+                    'value' : option['Configured']
+                }
+    return None
+
+
+def UpdateKernelOptionCli(name, value):
+    if ExecOnESX:
+        option = GetKernelOptionCli(name)
+        if option is None:
+            return None
+        if option['value'] == value:
+            return True
+        #
+        (err, val) = esxclipy.EsxcliPy().Execute(['system', 'settings', 'kernel', 'set', '-s', name, '-v', str(value)])
+        if err:
+            return False
+        return True
+    return None
 
 
 ################################################################################
@@ -289,6 +356,7 @@ def UpdateKernelModuleOption(host, name, value):
     try:
         host.configManager.kernelModuleSystem.UpdateModuleOptionString(name=name, options=value)
     except Exception as e:
+        printDebugMessage(e)
         return False
     #
     return True
@@ -332,9 +400,29 @@ def UpdatePowerPolicyConfig(host, name=None, key=None):
                 host.configManager.powerSystem.ConfigurePowerPolicy(key=policy['key'])
                 return True
             except Exception as e:
+                printDebugMessage(e)
                 return False
     #
     return False
+
+
+################################################################################
+### External Functions - CPU
+################################################################################
+def GetCpuHz(host):
+    return host.hardware.cpuInfo.hz
+
+
+def GetCpuEstMHz(host):
+    return (host.hardware.cpuInfo.hz + 500000) // 1000000
+
+
+def GetCpuSockets(host):
+    return host.hardware.cpuInfo.numCpuPackages
+
+
+def GetCpuCoresPerSocket(host):
+    return host.hardware.cpuInfo.numCpuCores // host.hardware.cpuInfo.numCpuPackages
 
 
 ################################################################################
@@ -388,6 +476,7 @@ def UpdatePciPassthruConfig(host, sbdf, value):
         host.configManager.pciPassthruSystem.UpdatePassthruConfig([reconfigDevice])
         host.configManager.pciPassthruSystem.Refresh()
     except Exception as e:
+        printDebugMessage(e)
         return False
     #
     return True
@@ -452,6 +541,7 @@ def UpdatePciSriovConfig(host, sbdf, enable, numVfs):
         host.configManager.pciPassthruSystem.UpdatePassthruConfig([reconfigDevice])
         host.configManager.pciPassthruSystem.Refresh()
     except Exception as e:
+        printDebugMessage(e)
         return False
     #
     return True
@@ -527,6 +617,7 @@ def UpdateVirtualSwitchConfig(host, name, pnics=None, mtu=None):
     try:
         host.configManager.networkSystem.UpdateVirtualSwitch(name, spec)
     except Exception as e:
+        printDebugMessage(e)
         return False
     #
     return True
@@ -552,6 +643,7 @@ def CreateVirtualSwitch(host, name, pnics, mtu=None):
     try:
         host.configManager.networkSystem.AddVirtualSwitch(name, spec)
     except Exception as e:
+        printDebugMessage(e)
         return False
     #
     return True
@@ -564,6 +656,7 @@ def DeleteVirtualSwitch(host, name):
     try:
         host.configManager.networkSystem.RemoveVirtualSwitch(name)
     except Exception as e:
+        printDebugMessage(e)
         return False
     #
     return True
@@ -611,6 +704,7 @@ def UpdatePortGroupConfig(host, name, vswitch=None, vlan=None, pnics=None):
     try:
         host.configManager.networkSystem.UpdatePortGroup(name, spec)
     except Exception as e:
+        printDebugMessage(e)
         return False
     #
     return True
@@ -634,6 +728,7 @@ def CreatePortGroup(host, name, vswitch, vlan=0):
     try:
         host.configManager.networkSystem.AddPortGroup(spec)
     except Exception as e:
+        printDebugMessage(e)
         return False
     #
     return True
@@ -646,6 +741,7 @@ def DeletePortGroup(host, name):
     try:
         host.configManager.networkSystem.RemovePortGroup(name)
     except Exception as e:
+        printDebugMessage(e)
         return False
     #
     return True
@@ -727,6 +823,23 @@ def GetHostDatastoreInfo(host, name):
     return None
 
 
+SearchedVms = []
+MappedRawDisks = {}
+def GetMappedRawDiskList(host):
+    global SearchedVms
+    global MappedRawDisks
+    for vm in host.vm:
+        if vm.name in SearchedVms:
+            continue
+        SearchedVms.append(vm.name)
+        for vdisk in GetVirtualDiskList(vm):
+            info = GetVirtualDiskInfo(vm, vdisk)
+            if info['naa'] is None:
+                continue
+            MappedRawDisks[info['naa']] = info['file']
+    return MappedRawDisks
+
+
 ################################################################################
 ### External Functions - Other Device
 ################################################################################
@@ -755,7 +868,6 @@ def GetVirtualMachineInfo(vm):
     passthrus = []
     for passthru in GetVirtualPciPassthruList(vm):
         passthrus.append(GetVirtualPciPassthruInfo(vm, passthru))
-    cdrom = True if GetVirtualCdRom(vm) is not None else False
     return {
         'name'                          : vm.config.name,
         'version'                       : vm.config.version,
@@ -775,7 +887,7 @@ def GetVirtualMachineInfo(vm):
         'vdisks'                        : vdisks,
         'vnics'                         : vnics,
         'passthrus'                     : passthrus,
-        'cdrom'                         : cdrom,
+        'cdrom'                         : GetVirtualCdRom(vm),
         'latency.enforceCpuMin'         : GetVirtualMachineOption(vm, 'latency.enforceCpuMin'),
         'numa.nodeAffinity'             : GetVirtualMachineOption(vm, 'numa.nodeAffinity'),
         'numa.autosize'                 : GetVirtualMachineOption(vm, 'numa.autosize'),
@@ -828,7 +940,7 @@ def GetVirtualDiskList(vm):
             disks.append((device.deviceInfo.label, device.controllerKey, device.key))
     disks.sort(key=lambda x: x[1])
     disks.sort(key=lambda x: x[2])
-    return map(lambda x: x[0], disks)
+    return list(map(lambda x: x[0], disks))
 
 
 def GetVirtualDiskInfo(vm, name):
@@ -937,9 +1049,10 @@ def GetVirtualCdRom(vm):
         if type(device) is vim.vm.device.VirtualCdrom:
             return {
                 'name'      : device.deviceInfo.label,
-                'type'      : 'cdrom',
+                'type'      : 'ISO File' if type(device.backing) is vim.vm.device.VirtualCdrom.IsoBackingInfo else 'Client Device',
                 'key'       : device.key,
-                'controller': device.controllerKey
+                'controller': device.controllerKey,
+                'iso'       : device.backing.fileName if type(device.backing) is vim.vm.device.VirtualCdrom.IsoBackingInfo else None
             }
     return None
 
@@ -960,7 +1073,17 @@ def CreateVirtualMachineSpec(host, name, datastore, guestId, version=None, firmw
     spec.guestId = guestId
     #
     spec.numCPUs = numCpus
-    spec.numCoresPerSocket = numCoresPerSocket
+    if GetEsxMajorVersion(host) >= 8:
+        if numCpus > GetCpuCoresPerSocket(host):
+            sockets = -(-numCpus // GetCpuSockets(host))
+            if (numCpus % sockets) == 0:
+                spec.numCoresPerSocket = numCpus // sockets
+            else:
+                spec.numCoresPerSocket = 1
+        else:
+            spec.numCoresPerSocket = numCoresPerSocket
+    else:
+        spec.numCoresPerSocket = numCoresPerSocket
     #
     spec.memoryMB = memoryMB
     #
@@ -1074,6 +1197,7 @@ def CreateVirtualMachineSpec(host, name, datastore, guestId, version=None, firmw
     #
     if disks is not None:
         indexes = {'0': 0, '1': 0, '2': 0, '3': 0}
+        mapped = GetMappedRawDiskList(host)
         for disk in disks:
             if int(disk['scsi']) >= 4 or indexes[str(disk['scsi'])] >= 33:
                 continue
@@ -1098,6 +1222,9 @@ def CreateVirtualMachineSpec(host, name, datastore, guestId, version=None, firmw
                 diskSpec.device.backing.diskMode = 'independent_persistent'
                 if disk['sharing'] == 'sharingMultiWriter':
                     diskSpec.device.backing.sharing = 'sharingMultiWriter'
+                    if disk['naa'] in mapped:
+                        diskSpec.fileOperation = None
+                        diskSpec.device.backing.fileName = mapped[disk['naa']]
                 else:
                     diskSpec.device.backing.sharing = 'sharingNone'
             else:
@@ -1156,15 +1283,15 @@ def CreateVirtualMachineSpec(host, name, datastore, guestId, version=None, firmw
 
 def CustomizeVirtualMachineSpec(spec, host, highLS=False, cpuPin=False, memPin=False, nodeAffinity=None):
     if highLS:
+        cpuPin = True
         memPin = True
-        spec.extraConfig.append(vim.option.OptionValue(key='latency.enforceCpuMin', value='FALSE'))
         for option in spec.extraConfig:
             if option.key == 'sched.cpu.latencySensitivity':
                 option.value = 'high'
     #
     if cpuPin:
         spec.cpuAllocation = vim.ResourceAllocationInfo()
-        spec.cpuAllocation.reservation = host.hardware.cpuInfo.hz // 1000000 * spec.numCPUs
+        spec.cpuAllocation.reservation = GetCpuEstMHz(host) * spec.numCPUs
     #
     if memPin:
         spec.memoryReservationLockedToMax = True
@@ -1172,6 +1299,7 @@ def CustomizeVirtualMachineSpec(spec, host, highLS=False, cpuPin=False, memPin=F
         spec.memoryAllocation.reservation = spec.memoryMB
         spec.extraConfig.append(vim.option.OptionValue(key='sched.mem.pin', value='TRUE'))
     #
+    nodeNum = 1
     if nodeAffinity is not None:
         nodeNum = len(str(nodeAffinity).split(','))
         if nodeNum > 1:
@@ -1243,13 +1371,38 @@ def AddIntelSriovVirtualNicDevice(spec, host, sbdf, portgroup, slot=None):
     return spec
 
 
-def ReconfigVirtualMachineSpec(vm, numCpus=None, memoryMB=None, nodeAffinity=None, isoFile=None):
+def ResetLatencySensitivitySpec(vm):
+    for option in vm.config.extraConfig:
+        if option.key == 'sched.cpu.latencySensitivity':
+            spec = vim.vm.ConfigSpec()
+            spec.extraConfig.append(vim.option.OptionValue(key='sched.cpu.latencySensitivity', value='normal'))
+            return spec
+    #
+    return None
+
+
+def ReconfigVirtualMachineSpec(host, vm, numCpus=None, highLS=None, memoryMB=None, nodeAffinity=None, isoFile=None):
     spec = vim.vm.ConfigSpec()
     #
     if numCpus is not None:
         spec.numCPUs = numCpus
+        if GetEsxMajorVersion(host) >= 8:
+            if numCpus > GetCpuCoresPerSocket(host):
+                sockets = -(-numCpus // GetCpuSockets(host))
+                if (numCpus % sockets) == 0:
+                    spec.numCoresPerSocket = numCpus // sockets
+                else:
+                    spec.numCoresPerSocket = 1
+        #
+        if vm.config.cpuAllocation.reservation > 0:
+            spec.cpuAllocation = vim.ResourceAllocationInfo()
+            spec.cpuAllocation.reservation = GetCpuEstMHz(host) * numCpus
+        #
+        if highLS:
+            spec.extraConfig.append(vim.option.OptionValue(key='sched.cpu.latencySensitivity', value='high'))
+        #
         if nodeAffinity is None:
-            nodeNum = 0
+            nodeNum = 1
             for config in vm.config.extraConfig:
                 if config.key == 'numa.nodeAffinity':
                     nodeNum = len(str(config.value).split(','))
@@ -1272,25 +1425,23 @@ def ReconfigVirtualMachineSpec(vm, numCpus=None, memoryMB=None, nodeAffinity=Non
             cpuNum = vm.config.hardware.numCPU
         #
         if nodeAffinity == "":
-            nodeNum = 0
-        else:
-            nodeNum = len(str(nodeAffinity).split(','))
-        #
-        if nodeNum == 0:
+            nodeNum = 1
             spec.extraConfig.append(vim.option.OptionValue(key='numa.vcpu.maxPerMachineNode', value=''))
             spec.extraConfig.append(vim.option.OptionValue(key='numa.vcpu.maxPerVirtualNode', value=''))
             spec.extraConfig.append(vim.option.OptionValue(key='numa.autosize', value=''))
             spec.extraConfig.append(vim.option.OptionValue(key='numa.nodeAffinity', value=''))
-        if nodeNum == 1:
-            spec.extraConfig.append(vim.option.OptionValue(key='numa.vcpu.maxPerMachineNode', value=''))
-            spec.extraConfig.append(vim.option.OptionValue(key='numa.vcpu.maxPerVirtualNode', value=''))
-            spec.extraConfig.append(vim.option.OptionValue(key='numa.autosize', value=''))
-            spec.extraConfig.append(vim.option.OptionValue(key='numa.nodeAffinity', value=str(nodeAffinity)))
-        if nodeNum > 1:
-            spec.extraConfig.append(vim.option.OptionValue(key='numa.vcpu.maxPerMachineNode', value=str(-(-cpuNum // nodeNum)))) ## Rounded up
-            spec.extraConfig.append(vim.option.OptionValue(key='numa.vcpu.maxPerVirtualNode', value=str(-(-cpuNum // nodeNum)))) ## Rounded up
-            spec.extraConfig.append(vim.option.OptionValue(key='numa.autosize', value='TRUE'))
-            spec.extraConfig.append(vim.option.OptionValue(key='numa.nodeAffinity', value=str(nodeAffinity)))
+        else:
+            nodeNum = len(str(nodeAffinity).split(','))
+            if nodeNum == 1:
+                spec.extraConfig.append(vim.option.OptionValue(key='numa.vcpu.maxPerMachineNode', value=''))
+                spec.extraConfig.append(vim.option.OptionValue(key='numa.vcpu.maxPerVirtualNode', value=''))
+                spec.extraConfig.append(vim.option.OptionValue(key='numa.autosize', value=''))
+                spec.extraConfig.append(vim.option.OptionValue(key='numa.nodeAffinity', value=str(nodeAffinity)))
+            else:
+                spec.extraConfig.append(vim.option.OptionValue(key='numa.vcpu.maxPerMachineNode', value=str(-(-cpuNum // nodeNum)))) ## Rounded up
+                spec.extraConfig.append(vim.option.OptionValue(key='numa.vcpu.maxPerVirtualNode', value=str(-(-cpuNum // nodeNum)))) ## Rounded up
+                spec.extraConfig.append(vim.option.OptionValue(key='numa.autosize', value='TRUE'))
+                spec.extraConfig.append(vim.option.OptionValue(key='numa.nodeAffinity', value=str(nodeAffinity)))
     #
     if isoFile is not None:
         pattern = r'/vmfs/volumes/([^/]+)/(.+iso)'
@@ -1321,11 +1472,14 @@ def CreateVirtualMachine(spec, host):
     pool = host.parent.resourcePool
     try:
         result = datacenter.vmFolder.CreateVM_Task(spec, pool)
+        time.sleep(1)
         while result.info.state == 'running':
             time.sleep(1)
         if result.info.state != 'success':
+            printDebugMessage(result.info)
             return False
     except Exception as e:
+        printDebugMessage(e)
         return False
     time.sleep(1)
     return True
@@ -1334,11 +1488,14 @@ def CreateVirtualMachine(spec, host):
 def ReconfigVirtualMachine(vm, spec):
     try:
         result = vm.ReconfigVM_Task(spec)
+        time.sleep(1)
         while result.info.state == 'running':
             time.sleep(1)
         if result.info.state != 'success':
+            printDebugMessage(result.info)
             return False
     except Exception as e:
+        printDebugMessage(e)
         return False
     time.sleep(1)
     return True
@@ -1347,11 +1504,43 @@ def ReconfigVirtualMachine(vm, spec):
 def DeleteVirtualMachine(vm):
     try:
         result = vm.Destroy_Task()
+        time.sleep(1)
         while result.info.state == 'running':
             time.sleep(1)
         if result.info.state != 'success':
+            printDebugMessage(result.info)
             return False
     except Exception as e:
+        printDebugMessage(e)
+        return False
+    time.sleep(1)
+    return True
+
+
+def RegisterVirturalMachine(host, vmName, datastore):
+    datacenter = host.parent.parent.parent
+    pool = host.parent.resourcePool
+    vmxPath = '[' + datastore + ']' + '/' + vmName + '/' + vmName + '.vmx'
+    try:
+        result = datacenter.vmFolder.RegisterVM_Task(vmxPath, vmName, False, pool)
+        time.sleep(1)
+        while result.info.state == 'running':
+            time.sleep(1)
+        if result.info.state != 'success':
+            printDebugMessage(result.info)
+            return False
+    except Exception as e:
+        printDebugMessage(e)
+        return False
+    time.sleep(1)
+    return True
+
+
+def UnregisterVirtualMacihne(vm):
+    try:
+        vm.UnregisterVM()
+    except Exception as e:
+        printDebugMessage(e)
         return False
     time.sleep(1)
     return True
